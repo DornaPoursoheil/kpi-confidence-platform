@@ -4,8 +4,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import warnings
-import sys
 
 from src.db import can_connect, get_config, read_sql_df
 from src.demo_data import load_demo_data
@@ -58,23 +56,13 @@ def prepare_overview_frames(
     confidence_col: str,
     value_col: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Returns:
-      overview_health
-      stability_df
-      temporal_df
-    """
     work = data.copy()
 
-    # time normalization once
     if mode == "Hourly" and "ts_utc" in work.columns:
         work["ts_utc"] = pd.to_datetime(work["ts_utc"], errors="coerce", utc=True)
     elif mode == "Daily" and "d_utc" in work.columns:
         work["d_utc"] = pd.to_datetime(work["d_utc"], errors="coerce")
 
-    # ---------------------------
-    # Overview health
-    # ---------------------------
     overview_health = pd.DataFrame()
     if entity_type == "detector" and confidence_col in work.columns and value_col in work.columns:
         group_cols = ["entity_id"]
@@ -91,23 +79,20 @@ def prepare_overview_frames(
             .reset_index()
         )
 
-    # ---------------------------
-    # Stability
-    # ---------------------------
     stability_df = pd.DataFrame()
     if entity_type == "detector" and confidence_col in work.columns:
         stability_df = (
             work.groupby("entity_id", dropna=False)
             .agg(
                 avg_conf=(confidence_col, "mean"),
-                low_conf_periods=(confidence_col, lambda s: (pd.to_numeric(s, errors="coerce") < 0.5).sum()),
+                low_conf_periods=(
+                    confidence_col,
+                    lambda s: (pd.to_numeric(s, errors="coerce") < 0.5).sum(),
+                ),
             )
             .reset_index()
         )
 
-    # ---------------------------
-    # Temporal frame
-    # ---------------------------
     temporal_df = pd.DataFrame()
     if mode == "Hourly" and "ts_utc" in work.columns and confidence_col in work.columns:
         temporal_df = work[["ts_utc", confidence_col]].dropna().copy()
@@ -173,6 +158,9 @@ def safe_unique_sorted(df: pd.DataFrame, col: str) -> list[str]:
 
 
 def make_detector_label(df: pd.DataFrame) -> pd.Series:
+    lat = pd.to_numeric(df["lat_wgs84"], errors="coerce")
+    lon = pd.to_numeric(df["lon_wgs84"], errors="coerce")
+
     return (
         df["det_id15"].fillna("").astype(str)
         + " — "
@@ -184,9 +172,9 @@ def make_detector_label(df: pd.DataFrame) -> pd.Series:
         + " / Spur "
         + df["spur"].fillna("").astype(str)
         + " / ("
-        + df["lat_wgs84"].round(6).astype(str)
+        + lat.round(6).astype(str)
         + ", "
-        + df["lon_wgs84"].round(6).astype(str)
+        + lon.round(6).astype(str)
         + ")"
     )
 
@@ -243,7 +231,6 @@ st.markdown(
 if not DEMO_MODE:
     cfg = get_config()
     ok, err = can_connect(cfg)
-
     if not ok:
         st.error(f"Database connection failed: {err}")
         st.stop()
@@ -341,7 +328,7 @@ if not kpi_families:
     st.stop()
 
 # ===============================
-# Main Filters (Sidebar Box)
+# Main Filters
 # ===============================
 with st.sidebar:
     st.divider()
@@ -386,6 +373,25 @@ if base_df.empty:
     st.warning("No data after applying KPI / vehicle / confidence filters.")
     st.stop()
 
+# hard safety filter for demo mode
+if mode == "Hourly" and "ts_utc" in base_df.columns:
+    base_df["ts_utc"] = pd.to_datetime(base_df["ts_utc"], errors="coerce", utc=True)
+    base_df = base_df[
+        (base_df["ts_utc"].dt.year == year_selected)
+        & (base_df["ts_utc"].dt.month == month_selected)
+    ].copy()
+
+if mode == "Daily" and "d_utc" in base_df.columns:
+    base_df["d_utc"] = pd.to_datetime(base_df["d_utc"], errors="coerce")
+    base_df = base_df[
+        (base_df["d_utc"].dt.year == year_selected)
+        & (base_df["d_utc"].dt.month == month_selected)
+    ].copy()
+
+if base_df.empty:
+    st.warning("No data after applying time filters.")
+    st.stop()
+
 # ===============================
 # Detector Lookup
 # ===============================
@@ -414,7 +420,15 @@ if entity_type == "detector":
     detector_lookup["lon_wgs84"] = pd.to_numeric(detector_lookup["lon_wgs84"], errors="coerce")
 
     detectors_with_data = set(base_df["entity_id"].astype(str).str.strip())
-    detector_lookup = detector_lookup[detector_lookup["det_id15"].isin(detectors_with_data)].copy()
+
+    detector_lookup = detector_lookup[
+        detector_lookup["det_id15"].astype(str).str.strip().isin(detectors_with_data)
+    ].copy()
+
+    detector_lookup = detector_lookup.sort_values(
+        by=["strasse", "det_id15"],
+        na_position="last"
+    ).reset_index(drop=True)
 
     if detector_lookup.empty:
         st.warning("No detector options available for the selected overview filters.")
@@ -423,7 +437,7 @@ if entity_type == "detector":
     detector_lookup["label"] = make_detector_label(detector_lookup)
 
 # ===============================
-# Prepared Frames (performance)
+# Prepared Frames
 # ===============================
 overview_health, stability_df, temporal_df = prepare_overview_frames(
     data=base_df,
@@ -464,7 +478,6 @@ if entity_type == "detector" and not overview_health.empty:
 
     fig_map = go.Figure()
 
-    # density layer
     fig_map.add_trace(
         go.Densitymapbox(
             lat=overview_health["lat_wgs84"],
@@ -477,7 +490,6 @@ if entity_type == "detector" and not overview_health.empty:
         )
     )
 
-    # marker layer
     max_periods = max(float(overview_health["periods"].max()), 1.0)
     fig_map.add_trace(
         go.Scattermapbox(
@@ -604,40 +616,53 @@ else:
 st.subheader("Temporal Confidence Pattern")
 
 if mode == "Hourly" and not temporal_df.empty:
-    pivot = temporal_df.pivot_table(
-        values=confidence_col,
-        index="hour",
-        columns="day",
-        aggfunc="mean",
-    )
+    temporal_df = temporal_df.copy()
+    temporal_df["day"] = pd.to_datetime(temporal_df["day"], errors="coerce")
 
-    ampel_scale = [
-        [0.0, "#e74c3c"],
-        [0.4, "#e74c3c"],
-        [0.4, "#f1c40f"],
-        [0.7, "#f1c40f"],
-        [0.7, "#2ecc71"],
-        [1.0, "#2ecc71"],
-    ]
+    temporal_df = temporal_df[
+        (temporal_df["day"].dt.year == year_selected)
+        & (temporal_df["day"].dt.month == month_selected)
+    ].copy()
 
-    fig_temporal = px.imshow(
-        pivot,
-        aspect="auto",
-        color_continuous_scale=ampel_scale,
-        zmin=0,
-        zmax=1,
-        title="Confidence Heatmap (Hour vs Day)",
-    )
+    if temporal_df.empty:
+        st.info("No hourly confidence data for the selected month.")
+    else:
+        temporal_df["day_label"] = temporal_df["day"].dt.strftime("%Y-%m-%d")
 
-    fig_temporal.update_layout(
-        template="plotly_dark",
-        coloraxis_colorbar=dict(
-            title="Confidence",
-            tickvals=[0.2, 0.55, 0.85],
-            ticktext=["Bad", "Medium", "Good"],
-        ),
-    )
+        pivot = temporal_df.pivot_table(
+            values=confidence_col,
+            index="hour",
+            columns="day_label",
+            aggfunc="mean",
+        )
 
-    st.plotly_chart(fig_temporal, use_container_width=True)
+        ampel_scale = [
+            [0.0, "#e74c3c"],
+            [0.4, "#e74c3c"],
+            [0.4, "#f1c40f"],
+            [0.7, "#f1c40f"],
+            [0.7, "#2ecc71"],
+            [1.0, "#2ecc71"],
+        ]
+
+        fig_temporal = px.imshow(
+            pivot,
+            aspect="auto",
+            color_continuous_scale=ampel_scale,
+            zmin=0,
+            zmax=1,
+            title=f"Confidence Heatmap ({year_selected}-{str(month_selected).zfill(2)})",
+        )
+
+        fig_temporal.update_layout(
+            template="plotly_dark",
+            coloraxis_colorbar=dict(
+                title="Confidence",
+                tickvals=[0.2, 0.55, 0.85],
+                ticktext=["Bad", "Medium", "Good"],
+            ),
+        )
+
+        st.plotly_chart(fig_temporal, use_container_width=True)
 else:
     st.info("Temporal confidence heatmap is available in Hourly mode only.")

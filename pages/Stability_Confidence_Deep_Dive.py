@@ -1,30 +1,19 @@
 from __future__ import annotations
 
-import datetime as dt
 import calendar
-import warnings
-import sys
-
-import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from src.db import can_connect, get_config, read_sql_df
 from src.demo_data import load_demo_data
 from src.queries import (
-    KPI_DIAGNOSTICS,
-    ML_ANOMALY,
-    QA_MISSING,
     YEAR_MONTHS,
     DETECTOR_LIST,
     KPI_DAILY,
     KPI_HOURLY,
     ANOMALY_OVERVIEW,
     MISSING_RATE,
-    ANOMALY_BY_STREET,
-    ANOMALY_BY_SENSOR,
 )
 from src.ui import apply_entity_labels, label_entity_type
 
@@ -70,7 +59,6 @@ def load_yearmonths():
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_data(query, params):
     if DEMO_MODE:
-        # Optional demo extensions:
         if query == ANOMALY_OVERVIEW:
             return load_demo_data("anomaly_overview", params)
         if query == MISSING_RATE:
@@ -82,7 +70,7 @@ def load_data(query, params):
 
 
 # =============================
-# page Einstellung
+# Page Setup
 # =============================
 st.set_page_config(page_title="Stability & Confidence Deep Dive", page_icon="🧠", layout="wide")
 
@@ -101,12 +89,10 @@ Focus:
 if not DEMO_MODE:
     cfg = get_config()
     ok, err = can_connect(cfg)
-
     if not ok:
         st.error(f"Database connection failed: {err}")
         st.stop()
 else:
-    ok, err = True, None
     st.info("Demo mode is active. Data is loaded from demo data, not from PostgreSQL.")
 
 
@@ -142,12 +128,10 @@ def infer_value_label(kpi_family: str | None) -> str:
         return "Selected KPI Value"
 
     k = str(kpi_family).lower()
-
     if "speed" in k or "geschwindigkeit" in k:
         return "Speed (km/h)"
     if "flow" in k or "volume" in k or "count" in k or "verkehr" in k:
         return "Flow / Volume (vehicles/hour)"
-
     return "Selected KPI Value"
 
 
@@ -190,20 +174,11 @@ def make_detector_label(df: pd.DataFrame) -> pd.Series:
 
 
 # ===============================
-# Page Styles
+# Styles
 # ===============================
 st.markdown(
     """
     <style>
-    .main-title {
-        font-size: 34px;
-        font-weight: 800;
-        margin-bottom: 0.2rem;
-    }
-    .subtle {
-        color: #A0A7B4;
-        margin-bottom: 1rem;
-    }
     .filter-box {
         background: linear-gradient(180deg, #111827 0%, #0F172A 100%);
         padding: 16px;
@@ -242,13 +217,6 @@ st.markdown(
         margin-top: 8px;
         margin-bottom: 6px;
     }
-    .legend-box {
-        background: #0F172A;
-        padding: 14px 16px;
-        border-radius: 14px;
-        border: 1px solid rgba(255,255,255,0.07);
-        margin-bottom: 10px;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -286,13 +254,11 @@ year_month_df = year_month_df.dropna(subset=["year_utc", "month_utc"]).copy()
 
 year_month_df["year_utc"] = year_month_df["year_utc"].astype(int)
 year_month_df["month_utc"] = year_month_df["month_utc"].astype(int)
-
 year_month_df["year_month"] = (
     year_month_df["year_utc"].astype(str)
     + "_"
     + year_month_df["month_utc"].astype(str).str.zfill(2)
 )
-
 year_month_df = year_month_df.sort_values(["year_utc", "month_utc"], ascending=[False, False])
 available_yearmonths = year_month_df["year_month"].drop_duplicates().tolist()
 
@@ -338,6 +304,25 @@ if x not in df.columns:
     st.error(f"Expected time column '{x}' not found.")
     st.stop()
 
+# hard safety filter
+if mode == "Hourly" and "ts_utc" in df.columns:
+    df["ts_utc"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
+    df = df[
+        (df["ts_utc"].dt.year == year_selected)
+        & (df["ts_utc"].dt.month == month_selected)
+    ].copy()
+
+if mode == "Daily" and "d_utc" in df.columns:
+    df["d_utc"] = pd.to_datetime(df["d_utc"], errors="coerce")
+    df = df[
+        (df["d_utc"].dt.year == year_selected)
+        & (df["d_utc"].dt.month == month_selected)
+    ].copy()
+
+if df.empty:
+    st.info("No data after applying time filters.")
+    st.stop()
+
 kpi_families = safe_unique_sorted(df, "kpi_family")
 veh = safe_unique_sorted(df, "vehicle_class")
 confidence_labels = safe_unique_sorted(df, confidence_label_col) if confidence_label_col else []
@@ -347,7 +332,7 @@ if not kpi_families:
     st.stop()
 
 # ===============================
-# Main Filters (Sidebar Box)
+# Main Filters
 # ===============================
 with st.sidebar:
     st.divider()
@@ -371,7 +356,7 @@ with st.sidebar:
 value_label = infer_value_label(kpi_family)
 
 # ===============================
-# Base Filtered Data (Overview Level)
+# Base Filtered Data
 # ===============================
 base_df = df.copy()
 
@@ -393,7 +378,7 @@ if base_df.empty:
     st.stop()
 
 # ===============================
-# Detector Lookup for Overview
+# Detector Lookup
 # ===============================
 detector_lookup = pd.DataFrame()
 
@@ -420,7 +405,14 @@ if entity_type == "detector":
     detector_lookup["lon_wgs84"] = pd.to_numeric(detector_lookup["lon_wgs84"], errors="coerce")
 
     detectors_with_data = set(base_df["entity_id"].astype(str).str.strip())
-    detector_lookup = detector_lookup[detector_lookup["det_id15"].isin(detectors_with_data)].copy()
+    detector_lookup = detector_lookup[
+        detector_lookup["det_id15"].astype(str).str.strip().isin(detectors_with_data)
+    ].copy()
+
+    detector_lookup = detector_lookup.sort_values(
+        by=["strasse", "det_id15"],
+        na_position="last"
+    ).reset_index(drop=True)
 
     if detector_lookup.empty:
         st.warning("No detector options available for the selected overview filters.")
@@ -429,41 +421,9 @@ if entity_type == "detector":
     detector_lookup["label"] = make_detector_label(detector_lookup)
 
 # ===============================
-# Overview Health Data
-# ===============================
-overview_health = pd.DataFrame()
-
-if entity_type == "detector" and confidence_col in base_df.columns and value_col in base_df.columns:
-    group_cols = ["entity_id"]
-    if "vehicle_class" in base_df.columns:
-        group_cols.append("vehicle_class")
-
-    overview_health = (
-        base_df.groupby(group_cols, dropna=False)
-        .agg(
-            avg_confidence=(confidence_col, "mean"),
-            avg_value=(value_col, "mean"),
-            periods=(confidence_col, "count"),
-        )
-        .reset_index()
-    )
-
-    overview_health["health"] = overview_health["avg_confidence"].apply(health_label)
-
-    overview_health = overview_health.merge(
-        detector_lookup[["det_id15", "lat_wgs84", "lon_wgs84", "label"]],
-        left_on="entity_id",
-        right_on="det_id15",
-        how="left",
-    )
-
-    overview_health = overview_health.dropna(subset=["lat_wgs84", "lon_wgs84"]).copy()
-
-# ===============================
-# Detector Selector (after Overview)
+# Drilldown
 # ===============================
 selected_detector_id = None
-selected_detector_label = None
 
 if entity_type == "detector":
     st.markdown('<div class="section-title">🎯 Detector Drilldown</div>', unsafe_allow_html=True)
@@ -477,9 +437,6 @@ if entity_type == "detector":
     )
     selected_detector_id = str(detector_map[selected_detector_label]).strip()
 
-# ===============================
-# Plot Data (Final Selection)
-# ===============================
 plot_df = base_df.copy()
 
 if entity_type == "detector" and selected_detector_id is not None:
@@ -492,7 +449,7 @@ if plot_df.empty:
 plot_df = plot_df.sort_values(x).copy()
 
 # ===============================
-# Data Quality Overview (Drilldown Level)
+# KPI Quality Overview
 # ===============================
 days_in_month = calendar.monthrange(year_selected, month_selected)[1]
 total_hours = days_in_month * 24
@@ -618,7 +575,7 @@ with col1:
             template="plotly_dark",
             labels={
                 "confidence_range": "Confidence Score",
-                "percent": "% of hours"
+                "percent": "% of periods"
             },
             title="Confidence Score Distribution (%)"
         )
@@ -654,7 +611,7 @@ with col2:
             template="plotly_dark",
             category_orders={confidence_label_col: conf_order},
             labels={
-                "percent": "% of hours",
+                "percent": "% of periods",
                 confidence_label_col: "Confidence Level"
             },
             color_discrete_map={
@@ -671,34 +628,32 @@ with col2:
 
         fig_vehicle.update_layout(
             height=420,
-            yaxis_title="% of hours",
+            yaxis_title="% of periods",
             xaxis_title=f"Vehicle: {vehicle.upper()}",
             margin=dict(l=40, r=40, t=50, b=40),
             hovermode="x unified"
         )
 
         fig_vehicle.update_yaxes(range=[0, 100])
-
         st.plotly_chart(fig_vehicle, use_container_width=True)
 
 # ===============================
-# DETECTOR DAILY PATTERN HEATMAP
+# Hourly-only detector heatmaps
 # ===============================
-if entity_type == "detector" and value_col in plot_df.columns and "ts_utc" in plot_df.columns:
+if mode == "Hourly" and entity_type == "detector" and value_col in plot_df.columns and "ts_utc" in plot_df.columns:
     st.subheader("🕒 Detector Daily Pattern")
 
     heat_df = plot_df.copy()
-    heat_df["hour"] = pd.to_datetime(heat_df["ts_utc"], utc=True, errors="coerce").dt.hour
-    heat_df["date"] = pd.to_datetime(heat_df["ts_utc"], utc=True, errors="coerce").dt.date
+    heat_df["ts_utc"] = pd.to_datetime(heat_df["ts_utc"], utc=True, errors="coerce")
+    heat_df["hour"] = heat_df["ts_utc"].dt.hour
+    heat_df["date"] = heat_df["ts_utc"].dt.date
 
     pivot = heat_df.pivot_table(
         values=value_col,
         index="date",
         columns="hour",
         aggfunc="mean"
-    )
-
-    pivot = pivot.reindex(columns=range(24))
+    ).reindex(columns=range(24))
 
     fig_heat = px.imshow(
         pivot,
@@ -719,24 +674,20 @@ if entity_type == "detector" and value_col in plot_df.columns and "ts_utc" in pl
 
     st.plotly_chart(fig_heat, use_container_width=True)
 
-# ===============================
-# DETECTOR CONFIDENCE HEATMAP
-# ===============================
-if entity_type == "detector" and confidence_col in plot_df.columns and "ts_utc" in plot_df.columns:
+if mode == "Hourly" and entity_type == "detector" and confidence_col in plot_df.columns and "ts_utc" in plot_df.columns:
     st.subheader("🧠 Detector Confidence Pattern")
 
     conf_heat = plot_df.copy()
-    conf_heat["hour"] = pd.to_datetime(conf_heat["ts_utc"], utc=True, errors="coerce").dt.hour
-    conf_heat["date"] = pd.to_datetime(conf_heat["ts_utc"], utc=True, errors="coerce").dt.date
+    conf_heat["ts_utc"] = pd.to_datetime(conf_heat["ts_utc"], utc=True, errors="coerce")
+    conf_heat["hour"] = conf_heat["ts_utc"].dt.hour
+    conf_heat["date"] = conf_heat["ts_utc"].dt.date
 
     pivot_conf = conf_heat.pivot_table(
         values=confidence_col,
         index="date",
         columns="hour",
         aggfunc="mean"
-    )
-
-    pivot_conf = pivot_conf.reindex(columns=range(24))
+    ).reindex(columns=range(24))
 
     fig_conf_heat = px.imshow(
         pivot_conf,
@@ -762,294 +713,196 @@ if entity_type == "detector" and confidence_col in plot_df.columns and "ts_utc" 
     st.plotly_chart(fig_conf_heat, use_container_width=True)
 
 st.caption(
-    f"Tip: current value metric is interpreted as '{value_label}'. Map and health overview follow all sidebar filters."
+    f"Tip: current value metric is interpreted as '{value_label}'. Charts follow all sidebar filters."
 )
 
 # =========================================================
-# DATA QUALITY SIGNALS
+# Hourly-only anomaly / missing diagnostics
 # =========================================================
 st.divider()
 
-ts_from = dt.datetime(year_selected, month_selected, 1)
+if mode == "Hourly":
+    ts_from = pd.Timestamp(year_selected, month_selected, 1, tz="UTC")
+    if month_selected == 12:
+        ts_to = pd.Timestamp(year_selected + 1, 1, 1, tz="UTC")
+    else:
+        ts_to = pd.Timestamp(year_selected, month_selected + 1, 1, tz="UTC")
 
-if month_selected == 12:
-    ts_to = dt.datetime(year_selected + 1, 1, 1)
-else:
-    ts_to = dt.datetime(year_selected, month_selected + 1, 1)
+    time_params = {
+        "ts_from": ts_from,
+        "ts_to": ts_to
+    }
 
-time_params = {
-    "ts_from": ts_from,
-    "ts_to": ts_to
-}
-
-anom = pd.DataFrame()
-miss = pd.DataFrame()
-
-try:
-    anom = load_data(ANOMALY_OVERVIEW, time_params)
-except Exception:
     anom = pd.DataFrame()
-
-try:
-    miss = load_data(MISSING_RATE, time_params)
-except Exception:
     miss = pd.DataFrame()
 
-merged = base_df.copy()
-merged["entity_id"] = merged["entity_id"].astype(str).str.strip()
+    try:
+        anom = load_data(ANOMALY_OVERVIEW, time_params)
+    except Exception:
+        anom = pd.DataFrame()
 
-if "ts_utc" in merged.columns:
-    merged["ts_utc"] = pd.to_datetime(
-        merged["ts_utc"],
-        utc=True,
-        errors="coerce"
-    )
+    try:
+        miss = load_data(MISSING_RATE, time_params)
+    except Exception:
+        miss = pd.DataFrame()
 
-if len(anom):
-    if "det_id15" in anom.columns:
-        anom = anom.rename(columns={"det_id15": "entity_id"})
+    merged = base_df.copy()
+    merged["entity_id"] = merged["entity_id"].astype(str).str.strip()
 
-    anom["entity_id"] = anom["entity_id"].astype(str).str.strip()
-
-    if "ts_utc" in anom.columns:
-        anom["ts_utc"] = pd.to_datetime(
-            anom["ts_utc"],
+    if "ts_utc" in merged.columns:
+        merged["ts_utc"] = pd.to_datetime(
+            merged["ts_utc"],
             utc=True,
             errors="coerce"
         )
 
-if len(miss):
-    if "det_id15" in miss.columns:
-        miss = miss.rename(columns={"det_id15": "entity_id"})
-
-    miss["entity_id"] = miss["entity_id"].astype(str).str.strip()
-
-    if "ts_utc" in miss.columns:
-        miss["ts_utc"] = pd.to_datetime(
-            miss["ts_utc"],
-            utc=True,
-            errors="coerce"
-        )
-
-visible_entities = set(
-    merged["entity_id"]
-    .dropna()
-    .astype(str)
-    .tolist()
-)
-
-if len(anom) and "entity_id" in anom.columns:
-    anom = anom[anom["entity_id"].isin(visible_entities)].copy()
-
-if len(miss) and "entity_id" in miss.columns:
-    miss = miss[miss["entity_id"].isin(visible_entities)].copy()
-
-if len(miss) and {"entity_id", "ts_utc", "missing_rate"}.issubset(miss.columns):
-    miss_small = miss[
-        ["entity_id", "ts_utc", "missing_rate"]
-    ].drop_duplicates()
-
-    merged = merged.merge(
-        miss_small,
-        on=["entity_id", "ts_utc"],
-        how="left"
-    )
-
-if len(anom) and {"entity_id", "ts_utc", "anomaly_score", "is_anomaly"}.issubset(anom.columns):
-    keep_cols = ["entity_id", "ts_utc", "anomaly_score", "is_anomaly"]
-    if "top_driver" in anom.columns:
-        keep_cols.append("top_driver")
-
-    anom_small = anom[keep_cols].drop_duplicates()
-
-    merged = merged.merge(
-        anom_small,
-        on=["entity_id", "ts_utc"],
-        how="left"
-    )
-
-# =========================================================
-# DATA QUALITY CORRELATION
-# =========================================================
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Data Quality Correlation")
-
-    corr_cols = [
-        "confidence_score",
-        "value",
-        "missing_rate",
-        "anomaly_score"
-    ]
-
-    corr_cols = [c for c in corr_cols if c in merged.columns]
-
-    if len(corr_cols) >= 2:
-        corr_df = merged[corr_cols].copy()
-
-        for c in corr_cols:
-            corr_df[c] = pd.to_numeric(corr_df[c], errors="coerce")
-
-        corr_matrix = corr_df.corr()
-
-        fig_corr = px.imshow(
-            corr_matrix,
-            text_auto=".2f",
-            color_continuous_scale="RdBu_r",
-            zmin=-1,
-            zmax=1,
-            template="plotly_dark",
-            title="Correlation between Data Quality Signals",
-            aspect="auto"
-        )
-
-        fig_corr.update_layout(
-            margin=dict(l=100, r=40, t=70, b=100),
-            height=520
-        )
-
-        fig_corr.update_xaxes(tickangle=35)
-        st.plotly_chart(fig_corr, use_container_width=True)
-    else:
-        st.caption("Not enough data quality signal columns available.")
-
-with col2:
-    st.subheader("Confidence Root Cause Matrix")
-
-    driver_cols = [
-        "missing_rate",
-        "anomaly_score",
-        "value"
-    ]
-
-    driver_cols = [c for c in driver_cols if c in merged.columns]
-
-    if "confidence_score" in merged.columns and len(driver_cols):
-        drivers = []
-
-        for col in driver_cols:
-            corr = merged["confidence_score"].corr(merged[col])
-
-            drivers.append({
-                "driver": col,
-                "correlation": corr
-            })
-
-        drivers_df = pd.DataFrame(drivers)
-
-        fig = px.bar(
-            drivers_df,
-            x="driver",
-            y="correlation",
-            color="correlation",
-            color_continuous_scale="RdYlGn",
-            range_y=[-1, 1],
-            template="plotly_dark",
-            title="Drivers impacting Confidence Score"
-        )
-
-        fig.update_layout(
-            xaxis_title="Quality Driver",
-            yaxis_title="Correlation with Confidence",
-            height=430
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("No driver metrics available.")
-
-# =========================================================
-# ANOMALY TIMELINE
-# =========================================================
-st.subheader("ML Anomaly Timeline")
-
-if len(anom):
-    fig = px.histogram(
-        anom,
-        x="ts_utc",
-        nbins=30,
-        color_discrete_sequence=["orange"],
-        template="plotly_dark",
-        title="Detected Anomalies over Time"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.caption("No ML anomaly data")
-
-# =========================================================
-# ANOMALY RATE BY SENSOR / STREET
-# =========================================================
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Anomaly Rate by Sensor")
-
-    if len(anom) and "is_anomaly" in anom.columns:
-        rate = (
-            anom.groupby("entity_id")
-            .agg(
-                anomaly_hours=("is_anomaly", "sum"),
-                total_hours=("is_anomaly", "count")
+    if len(anom):
+        anom["entity_id"] = anom["entity_id"].astype(str).str.strip()
+        if "ts_utc" in anom.columns:
+            anom["ts_utc"] = pd.to_datetime(
+                anom["ts_utc"],
+                utc=True,
+                errors="coerce"
             )
-            .reset_index()
-        )
 
-        rate["anomaly_rate"] = rate["anomaly_hours"] / rate["total_hours"]
-        rate = rate.sort_values("anomaly_rate", ascending=False).head(20)
-        rate["rank"] = range(1, len(rate) + 1)
+    if len(miss):
+        miss["entity_id"] = miss["entity_id"].astype(str).str.strip()
+        if "ts_utc" in miss.columns:
+            miss["ts_utc"] = pd.to_datetime(
+                miss["ts_utc"],
+                utc=True,
+                errors="coerce"
+            )
 
-        def classify_sensor(r):
-            if r <= 3:
-                return "Critical (Top 3)"
-            elif r <= 10:
-                return "High (4–10)"
-            return "Normal"
+    visible_entities = set(
+        merged["entity_id"]
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
 
-        rate["category"] = rate["rank"].apply(classify_sensor)
+    if len(anom) and "entity_id" in anom.columns:
+        anom = anom[anom["entity_id"].isin(visible_entities)].copy()
 
-        fig = px.bar(
-            rate,
-            x="entity_id",
-            y="anomaly_rate",
-            color="category",
-            template="plotly_dark",
-            title="Top Sensors with Highest Anomaly Rate",
-            color_discrete_map={
-                "Critical (Top 3)": "#e74c3c",
-                "High (4–10)": "#f39c12",
-                "Normal": "#3498db"
-            }
-        )
+    if len(miss) and "entity_id" in miss.columns:
+        miss = miss[miss["entity_id"].isin(visible_entities)].copy()
 
-        fig.update_layout(
-            xaxis_title="Sensor (Detector)",
-            yaxis_title="Anomaly Rate",
-            legend_title="Risk Level",
-            height=500
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("No anomaly sensor data available.")
-
-with col2:
-    st.subheader("Anomaly Rate by Street")
-
-    if entity_type == "detector" and not detector_lookup.empty and len(anom):
-        anom_street = anom.merge(
-            detector_lookup[["det_id15", "strasse"]],
-            left_on="entity_id",
-            right_on="det_id15",
+    if len(miss) and {"entity_id", "ts_utc", "missing_rate"}.issubset(miss.columns):
+        miss_small = miss[["entity_id", "ts_utc", "missing_rate"]].drop_duplicates()
+        merged = merged.merge(
+            miss_small,
+            on=["entity_id", "ts_utc"],
             how="left"
         )
 
-        anom_street = anom_street.dropna(subset=["strasse"])
+    if len(anom) and {"entity_id", "ts_utc", "anomaly_score", "is_anomaly"}.issubset(anom.columns):
+        keep_cols = ["entity_id", "ts_utc", "anomaly_score", "is_anomaly"]
+        if "top_driver" in anom.columns:
+            keep_cols.append("top_driver")
+        if "driver_value" in anom.columns:
+            keep_cols.append("driver_value")
 
-        if not anom_street.empty:
-            street_rate = (
-                anom_street.groupby("strasse")
+        anom_small = anom[keep_cols].drop_duplicates()
+        merged = merged.merge(
+            anom_small,
+            on=["entity_id", "ts_utc"],
+            how="left"
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Data Quality Correlation")
+
+        corr_cols = ["confidence_score", "value", "missing_rate", "anomaly_score"]
+        corr_cols = [c for c in corr_cols if c in merged.columns]
+
+        if len(corr_cols) >= 2:
+            corr_df = merged[corr_cols].copy()
+            for c in corr_cols:
+                corr_df[c] = pd.to_numeric(corr_df[c], errors="coerce")
+
+            corr_matrix = corr_df.corr()
+
+            fig_corr = px.imshow(
+                corr_matrix,
+                text_auto=".2f",
+                color_continuous_scale="RdBu_r",
+                zmin=-1,
+                zmax=1,
+                template="plotly_dark",
+                title="Correlation between Data Quality Signals",
+                aspect="auto"
+            )
+
+            fig_corr.update_layout(
+                margin=dict(l=100, r=40, t=70, b=100),
+                height=520
+            )
+
+            fig_corr.update_xaxes(tickangle=35)
+            st.plotly_chart(fig_corr, use_container_width=True)
+        else:
+            st.caption("Not enough data quality signal columns available.")
+
+    with col2:
+        st.subheader("Confidence Root Cause Matrix")
+
+        driver_cols = ["missing_rate", "anomaly_score", "value"]
+        driver_cols = [c for c in driver_cols if c in merged.columns]
+
+        if "confidence_score" in merged.columns and len(driver_cols):
+            drivers = []
+            for col in driver_cols:
+                corr = merged["confidence_score"].corr(merged[col])
+                drivers.append({"driver": col, "correlation": corr})
+
+            drivers_df = pd.DataFrame(drivers)
+
+            fig = px.bar(
+                drivers_df,
+                x="driver",
+                y="correlation",
+                color="correlation",
+                color_continuous_scale="RdYlGn",
+                range_y=[-1, 1],
+                template="plotly_dark",
+                title="Drivers impacting Confidence Score"
+            )
+
+            fig.update_layout(
+                xaxis_title="Quality Driver",
+                yaxis_title="Correlation with Confidence",
+                height=430
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("No driver metrics available.")
+
+    st.subheader("ML Anomaly Timeline")
+
+    if len(anom):
+        fig = px.histogram(
+            anom,
+            x="ts_utc",
+            nbins=30,
+            color_discrete_sequence=["orange"],
+            template="plotly_dark",
+            title="Detected Anomalies over Time"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.caption("No ML anomaly data")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Anomaly Rate by Sensor")
+
+        if len(anom) and "is_anomaly" in anom.columns:
+            rate = (
+                anom.groupby("entity_id")
                 .agg(
                     anomaly_hours=("is_anomaly", "sum"),
                     total_hours=("is_anomaly", "count")
@@ -1057,26 +910,26 @@ with col2:
                 .reset_index()
             )
 
-            street_rate["anomaly_rate"] = street_rate["anomaly_hours"] / street_rate["total_hours"]
-            street_rate = street_rate.sort_values("anomaly_rate", ascending=False).head(20)
-            street_rate["rank"] = range(1, len(street_rate) + 1)
+            rate["anomaly_rate"] = rate["anomaly_hours"] / rate["total_hours"]
+            rate = rate.sort_values("anomaly_rate", ascending=False).head(20)
+            rate["rank"] = range(1, len(rate) + 1)
 
-            def classify_street(r):
+            def classify_sensor(r):
                 if r <= 3:
                     return "Critical (Top 3)"
-                elif r <= 10:
+                if r <= 10:
                     return "High (4–10)"
                 return "Normal"
 
-            street_rate["category"] = street_rate["rank"].apply(classify_street)
+            rate["category"] = rate["rank"].apply(classify_sensor)
 
             fig = px.bar(
-                street_rate,
-                x="strasse",
+                rate,
+                x="entity_id",
                 y="anomaly_rate",
                 color="category",
                 template="plotly_dark",
-                title="Streets with Highest Sensor Anomaly Rate",
+                title="Top Sensors with Highest Anomaly Rate",
                 color_discrete_map={
                     "Critical (Top 3)": "#e74c3c",
                     "High (4–10)": "#f39c12",
@@ -1084,9 +937,8 @@ with col2:
                 }
             )
 
-            fig.update_xaxes(tickangle=35)
             fig.update_layout(
-                xaxis_title="Street",
+                xaxis_title="Sensor (Detector)",
                 yaxis_title="Anomaly Rate",
                 legend_title="Risk Level",
                 height=500
@@ -1094,6 +946,71 @@ with col2:
 
             st.plotly_chart(fig, use_container_width=True)
         else:
+            st.caption("No anomaly sensor data available.")
+
+    with col2:
+        st.subheader("Anomaly Rate by Street")
+
+        if entity_type == "detector" and not detector_lookup.empty and len(anom):
+            anom_street = anom.merge(
+                detector_lookup[["det_id15", "strasse"]],
+                left_on="entity_id",
+                right_on="det_id15",
+                how="left"
+            )
+
+            anom_street = anom_street.dropna(subset=["strasse"])
+
+            if not anom_street.empty:
+                street_rate = (
+                    anom_street.groupby("strasse")
+                    .agg(
+                        anomaly_hours=("is_anomaly", "sum"),
+                        total_hours=("is_anomaly", "count")
+                    )
+                    .reset_index()
+                )
+
+                street_rate["anomaly_rate"] = street_rate["anomaly_hours"] / street_rate["total_hours"]
+                street_rate = street_rate.sort_values("anomaly_rate", ascending=False).head(20)
+                street_rate["rank"] = range(1, len(street_rate) + 1)
+
+                def classify_street(r):
+                    if r <= 3:
+                        return "Critical (Top 3)"
+                    if r <= 10:
+                        return "High (4–10)"
+                    return "Normal"
+
+                street_rate["category"] = street_rate["rank"].apply(classify_street)
+
+                fig = px.bar(
+                    street_rate,
+                    x="strasse",
+                    y="anomaly_rate",
+                    color="category",
+                    template="plotly_dark",
+                    title="Streets with Highest Sensor Anomaly Rate",
+                    color_discrete_map={
+                        "Critical (Top 3)": "#e74c3c",
+                        "High (4–10)": "#f39c12",
+                        "Normal": "#3498db"
+                    }
+                )
+
+                fig.update_xaxes(tickangle=35)
+                fig.update_layout(
+                    xaxis_title="Street",
+                    yaxis_title="Anomaly Rate",
+                    legend_title="Risk Level",
+                    height=500
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption("No street-level anomaly data available.")
+        else:
             st.caption("No street-level anomaly data available.")
-    else:
-        st.caption("No street-level anomaly data available.")
+
+else:
+    st.info("Anomaly and missing-rate diagnostics are available in Hourly mode only.")
