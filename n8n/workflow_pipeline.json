@@ -1,0 +1,267 @@
+{
+  "name": "wf2-pipeline engine (fixed)",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -736,
+        112
+      ],
+      "id": "532eccf6-e64a-45ff-be1b-190734887807",
+      "name": "Trigger wf1_pipeline"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT month_key\nFROM ingestion.file_history\nWHERE decision = 'ingested'\nAND run_id = $1\nORDER BY month_key;",
+        "options": {
+          "queryReplacement": "=={{ $json.py_run_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -560,
+        112
+      ],
+      "id": "984963d2-9e6e-4a46-aaa4-7db84f0bf91a",
+      "name": "Check New Ingested Month",
+      "credentials": {
+        "postgres": {
+          "id": "tIAJ3HNudkY5kvIs",
+          "name": "Postgres account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst month_keys = rows.map(r => r.json.month_key).filter(Boolean);\n\nif (month_keys.length === 0) {\n  return [\n    {\n      json: {\n        skip: true,\n        month_keys: [],\n        steps: []\n      }\n    }\n  ];\n}\n\nreturn [\n  {\n    json: {\n      skip: false,\n      month_keys: month_keys,\n      steps: [\"stage\", \"engine\", \"ml\"]\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        112
+      ],
+      "id": "38ae9cce-0033-4a76-8da4-b05a50fe4b79",
+      "name": "Extract Year_Month"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        112
+      ],
+      "id": "8cc7b688-3883-4505-8a13-56b45361d7ba",
+      "name": "Has New Months?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/run-pipeline",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { month_keys: $json.month_keys, steps: $json.steps } }}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "3e253050-fc36-4ad5-b189-1e871065b648",
+      "name": "Python Engine",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\nconst runId = data.run_id || 'unknown';\nconst results = data.results || [];\n\nlet success = [];\nlet skipped = [];\nlet failed = [];\n\nfor (const r of results) {\n  const pipelineStatus = r.pipeline?.status;\n  const mlStatus = r.ml?.status;\n\n  if (pipelineStatus === 'ok') {\n    const mlNote = (mlStatus && mlStatus !== 'ok')\n      ? ` (ML: ${mlStatus})`\n      : '';\n    success.push(`- ${r.month_key}${mlNote}`);\n  }\n  else if (pipelineStatus === 'skipped_guardrail') {\n    skipped.push(`- ${r.month_key} (Guardrail hat Monat übersprungen, rc=42)`);\n  }\n  else {\n    let reason = 'Unbekannter Fehler';\n    const stderr = r.pipeline?.stderr || '';\n\n    if (stderr.includes('Local file not found')) {\n      reason = 'Quelldatei nicht gefunden';\n    } else if (stderr.includes('detektor')) {\n      reason = 'Dateiname-Mismatch (detektor vs detektoren)';\n    } else if (stderr.includes('UniqueViolation')) {\n      reason = 'UniqueViolation – --replace-month-slice fehlt?';\n    } else if (pipelineStatus === 'error') {\n      reason = 'Pipeline-Fehler (siehe Logs)';\n    }\n\n    failed.push(`- ${r.month_key}: ${reason}`);\n  }\n}\n\nconst successText = success.length ? success.join('\\n') : '_keine_';\nconst skippedText = skipped.length ? skipped.join('\\n') : '_keine_';\nconst failedText  = failed.length  ? failed.join('\\n')  : '_keine_';\n\nconst overallStatus = failed.length > 0\n  ? ':x: completed_with_errors'\n  : ':white_check_mark: completed';\n\nconst message = `:package: *KPI Confidence Pipeline – Execution Report*\n\nRun ID: ${runId}\n\n────────────────────────\n\n:white_check_mark: *Erfolgreich verarbeitet*\n${successText}\n\n:warning: *Übersprungen (Guardrail)*\n${skippedText}\n\n:x: *Fehlgeschlagen*\n${failedText}\n\n────────────────────────\n\n:bar_chart: *Zusammenfassung*\nGesamt: ${results.length}  |  OK: ${success.length}  |  Guardrail: ${skipped.length}  |  Fehler: ${failed.length}\n\nStatus: ${overallStatus}`;\n\nreturn [ { json: { text: message } } ];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "615cad85-baea-4e4e-a2f1-ca20c6c5e667",
+      "name": "Parse Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      text: ':information_source: *KPI Confidence Pipeline* – Workflow 2 gestartet, aber keine neu ingesierten Monate gefunden. Keine Pipeline-Ausführung notwendig.'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        240
+      ],
+      "id": "b81d41c9-2727-4199-bf86-282fb0b22182",
+      "name": "Nothing To Process"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#pipeline_engin",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        400,
+        112
+      ],
+      "id": "681551b8-b742-415a-8642-cad90ecc6d24",
+      "name": "Send Alert",
+      "webhookId": "7ccdc0ad-2cea-41e1-b132-1f22b75424cf",
+      "credentials": {
+        "slackApi": {
+          "id": "DvWXzFfoKcbGFG8h",
+          "name": "Slack account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger wf1_pipeline": {
+      "main": [
+        [
+          {
+            "node": "Check New Ingested Month",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check New Ingested Month": {
+      "main": [
+        [
+          {
+            "node": "Extract Year_Month",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Year_Month": {
+      "main": [
+        [
+          {
+            "node": "Has New Months?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has New Months?": {
+      "main": [
+        [
+          {
+            "node": "Python Engine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing To Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python Engine": {
+      "main": [
+        [
+          {
+            "node": "Parse Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Result": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nothing To Process": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "07e0d837-e216-4d46-8465-9eb9d851253c",
+  "meta": {
+    "instanceId": "2e4a521231e66a81e1a37093b863c59b462694a229c1a33b2dd08d16fd04ee50"
+  },
+  "id": "OFolT80vyKo0q4jd",
+  "tags": []
+}

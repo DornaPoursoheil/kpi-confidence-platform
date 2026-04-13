@@ -1,0 +1,467 @@
+{
+  "name": "WF1-Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        96
+      ],
+      "id": "1c0d8555-b845-4182-b8f6-7c5055b2c269",
+      "name": "Manual Run"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "333ebf25-e20f-47e0-91e7-d0a775d8a1ab",
+              "name": "date_from",
+              "value": "2019_12",
+              "type": "string"
+            },
+            {
+              "id": "6b0bd442-0fad-48e1-a60f-4a6e04823303",
+              "name": "date_to",
+              "value": "2019_12",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -288,
+        96
+      ],
+      "id": "1b62a4d7-6361-40a4-a798-0f75a44c1277",
+      "name": "Manual scope input"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/ingest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        576,
+        80
+      ],
+      "id": "7d1788bb-1118-45e7-bedf-fef4a867c9c2",
+      "name": "Trigger Python via HTTP",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn [\n  {\n    json: {\n      run_id: items[0].json.run_id,\n      triggered_by: \"n8n\",\n      targets: items.map(i => ({\n        month_key: i.json.month_key,\n        dataset_version: i.json.dataset_version,\n        source_type: i.json.source_type,\n        url: i.json.source_url\n      }))\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        -80
+      ],
+      "id": "d6be50ee-442b-4f19-a468-87d35ee18ab6",
+      "name": "Aggregate targets"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update ingestion.ingestion_runs\nset\n  status = 'completed',\n  payload = payload || jsonb_build_object(\n    'py_run_id', $1::text,\n    'py_status', $2::text\n  )\nwhere run_id = $3::uuid;",
+        "options": {
+          "queryReplacement": "=$1 = {{$json.py_run_id}}\n$2 = {{$node[\"Trigger Python via HTTP\"].json.body.status}}\n$3 = {{$node[\"DB_Create ingestion run\"].json.run_id}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -256,
+        320
+      ],
+      "id": "01f93f3b-11eb-4fa8-b736-aa8fd614fc84",
+      "name": "Update run_id",
+      "credentials": {
+        "postgres": {
+          "id": "tIAJ3HNudkY5kvIs",
+          "name": "Postgres account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -288,
+        -80
+      ],
+      "id": "2ab33662-49f7-4df0-b797-6448e4fd56b7",
+      "name": "Trigger_Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ingestion.ingestion_runs\n(triggered_by, status, payload)\nVALUES\n(\n  'n8n_local',\n  'running',\n  jsonb_build_object(\n    'date_from', COALESCE($1::text, NULL),\n    'date_to',   COALESCE($2::text, NULL)\n  )\n)\nRETURNING\n  run_id,\n  $1::text AS date_from,\n  $2::text AS date_to;\n",
+        "options": {
+          "queryBatching": "single",
+          "queryReplacement": "=Parameter 1={{ $json.date_from || null }}\nParameter 2={{ $json.date_to || null }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -64,
+        96
+      ],
+      "id": "dbfe7089-5540-4f8f-8cec-5f4f83f93a0a",
+      "name": "DB_Create ingestion run",
+      "credentials": {
+        "postgres": {
+          "id": "tIAJ3HNudkY5kvIs",
+          "name": "Postgres account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "=#pipeline_alert",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_message }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        544,
+        320
+      ],
+      "id": "c3ff5450-9bbd-4f98-95e2-766f7ab90c73",
+      "name": "Send a message",
+      "webhookId": "7f3f46a8-47a5-4d30-9af8-0c260728df12",
+      "credentials": {
+        "slackApi": {
+          "id": "DvWXzFfoKcbGFG8h",
+          "name": "Slack account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8ae8f94b-104c-4fe9-bba4-79837b287643",
+              "name": "py_run_id",
+              "value": "={{ $node[\"Trigger Python via HTTP\"].json.body.stdout.match(/run_id:\\s*([a-f0-9-]+)/i)[1] }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        720,
+        96
+      ],
+      "id": "727ff798-1255-43eb-9d70-dc4c7e84c2a0",
+      "name": "Vars_Set py_run_id"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select\n  count(*) filter (where decision = 'skipped_unchanged') as skipped_unchanged,\n  count(*) filter (where decision = 'ingested') as ingested,\n  count(*) filter (where decision = 'skip_missing') as skip_missing,\n  count(*) filter (where decision = 'failed') as failed\nfrom ingestion.file_history\nwhere run_id = $1::uuid;",
+        "options": {
+          "queryReplacement": "=$1 =={{ $('Vars_Set py_run_id').item.json.py_run_id }}\n}}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -16,
+        320
+      ],
+      "id": "2f757da0-3dd4-4d2c-9200-d2b806f08bfa",
+      "name": "Build ingestion summary",
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "tIAJ3HNudkY5kvIs",
+          "name": "Postgres account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "bf364e06-eb6f-45b1-86b1-f811e7087dac",
+              "name": "started_at",
+              "value": "={{$now}}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        448,
+        -48
+      ],
+      "id": "0794a63b-8b6e-45d4-8bd8-1666d9c5d601",
+      "name": "set-start Timestamp"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===============================\n// Build Slack Alert Message\n// ===============================\n\n// ---- Input: Summary Metrics ----\nconst summary = $input.first().json;\n\nconst ingested = Number(summary.ingested || 0);\nconst skipped = Number(summary.skipped_unchanged || 0);\nconst missing = Number(summary.skip_missing || 0);\nconst failed  = Number(summary.failed || 0);\n\n// ---- Run Context (Zeitraum, Trigger) ----\nconst runContext = $node[\"DB_Create ingestion run\"].json || {};\nconst triggeredBy = runContext.triggered_by || \"unbekannt\";\n\n// ---- Zeitraum bestimmen ----\nlet periodText = \"\";\n\nconst hasValidRange =\n  runContext.date_from &&\n  runContext.date_to &&\n  runContext.date_from !== \"null\" &&\n  runContext.date_to !== \"null\";\n\nif (hasValidRange) {\n  // manueller Zeitraum\n  periodText = `${runContext.date_from} – ${runContext.date_to}`;\n} else {\n  // Scheduler oder Fallback → aus Targets\n  const targets = ($node[\"Aggregate targets\"]?.json?.targets) || [];\n  const monthKeys = [...new Set(targets.map(t => t.month_key))].sort();\n\n  if (monthKeys.length === 1) {\n    periodText = monthKeys[0];\n  } else if (monthKeys.length > 1) {\n    periodText = `${monthKeys[0]} – ${monthKeys[monthKeys.length - 1]}`;\n  } else {\n    periodText = \"Zeitraum nicht verfügbar\";\n  }\n}\n// ---- Laufart ----\nlet runTypeText = \"Manueller Lauf\";\nif (triggeredBy === \"n8n\") {\n  runTypeText = \"Automatischer Lauf (Scheduler)\";\n}\n\n// ---- Bewertung & Status ----\nlet evaluationText = \"\";\nlet statusText = \"\";\nlet statusEmoji = \"\";\n\nif (failed > 0) {\n  statusEmoji = \"🔴\";\n  evaluationText =\n    \"Während des Ingestion-Prozesses sind technische Fehler aufgetreten. \" +\n    \"Die Verarbeitung konnte nicht vollständig abgeschlossen werden.\";\n  statusText = \"Fehlerzustand – manuelle Prüfung erforderlich.\";\n} else if (ingested > 0) {\n  statusEmoji = \"🟢\";\n  evaluationText =\n    \"Es wurden neue oder aktualisierte Detektordaten erkannt und erfolgreich in die Datenbank geladen.\";\n  statusText = \"Pipeline erfolgreich ausgeführt.\";\n} else if (missing > 0) {\n  statusEmoji = \"🟠\";\n  evaluationText =\n    \"Einige erwartete Dateien waren nicht verfügbar. \" +\n    \"Die Pipeline blieb stabil, jedoch sind Datenlücken möglich.\";\n  statusText = \"Teilweise Abweichungen – Monitoring empfohlen.\";\n} else {\n  statusEmoji = \"🟡\";\n  evaluationText =\n    \"Es wurden keine neuen oder geänderten Daten veröffentlicht. \" +\n    \"Der Datenbestand ist weiterhin synchron mit dem letzten bekannten Stand.\";\n  statusText = \"Stabiler Zustand – kein Handlungsbedarf.\";\n}\n\n// ---- Slack Message (Markdown) ----\nconst message = `\n *Ingestion Monitoring – Verkehrsdetektion Berlin*\n\n*Run Information*\n▶️ *Laufart:* ${runTypeText}  \n📅 *Verarbeiteter Zeitraum:* ${periodText}\n\n*Ergebnis (letzter Lauf)*\n🟢 *Neue / aktualisierte Dateien:* ${ingested}  \n🟡 *Unveränderte Dateien (Skip):* ${skipped}  \n🟠 *Fehlende Dateien (Missing):* ${missing}  \n🔴 *Technische Fehler:* ${failed}\n\n*Bewertung*\n${evaluationText}\n\n*Pipeline Status*\n${statusEmoji} ${statusText}\n\n_Überwachung via n8n · KPI Confidence Projekt_  \n_Automated with this n8n workflow_\n`.trim();\n\n// ---- Output ----\nreturn [\n  {\n    json: {\n      slack_message: message,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        320
+      ],
+      "id": "eb4cc261-49e7-4150-8a63-84e4be641054",
+      "name": "Build Slack Alert Message3"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst runId = input.run_id;\n\n\n// -----------------------------\n// Parse YYYY-MM or YYYY_MM\n// -----------------------------\nfunction parseYYYYMM(s) {\n\n  if (!s) return null;\n\n  const clean = String(s).trim().replace(\"_\", \"-\");\n  const parts = clean.split(\"-\");\n\n  if (parts.length !== 2) return null;\n\n  const y = parseInt(parts[0], 10);\n  const m = parseInt(parts[1], 10);\n\n  if (!y || !m || m < 1 || m > 12) return null;\n\n  return { y, m };\n}\n\n\n// -----------------------------\n// Generate month range\n// -----------------------------\nfunction generateMonths(fromY, fromM, toY, toM) {\n\n  const months = [];\n\n  let y = fromY;\n  let m = fromM;\n\n  while (y < toY || (y === toY && m <= toM)) {\n\n    months.push({ year: y, month: m });\n\n    m++;\n\n    if (m > 12) {\n      m = 1;\n      y++;\n    }\n\n  }\n\n  return months;\n\n}\n\n\n// -----------------------------\n// Determine run scope\n// -----------------------------\nconst fromParsed = parseYYYYMM(input.date_from);\nconst toParsed   = parseYYYYMM(input.date_to);\n\nlet fromYear, fromMonth, toYear, toMonth;\n\n\n// ---------- MANUAL RUN ----------\nif (fromParsed) {\n\n  fromYear = fromParsed.y;\n  fromMonth = fromParsed.m;\n\n  if (toParsed) {\n    toYear = toParsed.y;\n    toMonth = toParsed.m;\n  } else {\n    toYear = fromYear;\n    toMonth = fromMonth;\n  }\n\n}\n\n// ---------- SCHEDULE RUN ----------\nelse {\n\n  const now = new Date();\n\n  let y = now.getFullYear();\n  let m = now.getMonth(); // previous month\n\n  if (m === 0) {\n    y -= 1;\n    m = 12;\n  }\n\n  fromYear = y;\n  fromMonth = m;\n\n  toYear = y;\n  toMonth = m;\n\n}\n\n// -----------------------------\n// Generate months\n// -----------------------------\nconst months = generateMonths(fromYear, fromMonth, toYear, toMonth);\n\n\n// -----------------------------\n// Build targets\n// -----------------------------\nconst targets = [];\n\n\nmonths.forEach(({ year, month }) => {\n\n  const monthStr = String(month).padStart(2, \"0\");\n  const month_key = `${year}_${monthStr}`;\n\n\n  // ---------- OLD DETECTORS ----------\n  targets.push({\n    json: {\n      run_id: runId,\n      triggered_by: \"n8n\",\n      month_key,\n      dataset_version: \"old\",\n      source_type: \"detectors\",\n      source_url:\n        `https://mdhopendata.blob.core.windows.net/verkehrsdetektion/${year}/alte_qualitaetssicherung/Fahrstreifendetektoren/det_val_hr_${year}_${monthStr}.csv.gz`\n    }\n  });\n\n\n  // ---------- OLD CROSS SECTIONS ----------\n  targets.push({\n    json: {\n      run_id: runId,\n      triggered_by: \"n8n\",\n      month_key,\n      dataset_version: \"old\",\n      source_type: \"cross_sections\",\n      source_url:\n        `https://mdhopendata.blob.core.windows.net/verkehrsdetektion/${year}/alte_qualitaetssicherung/Messquerschnitte/mq_hr_${year}_${monthStr}.csv.gz`\n    }\n  });\n\n\n  // ---------- NEW DETECTORS ----------\n\n  const basePath =\n    `https://mdhopendata.blob.core.windows.net/verkehrsdetektion/${year}/neue_qualitaetssicherung/Fahrstreifendetektoren/`;\n\n\n  // rule: before 2025 only 1 filename\n  // after 2026 both candidates\n  const detectorCandidates = year >= 2025\n    ? [\n        `detektoren_${year}_${monthStr}.tgz`,\n        `detektor_${year}_${monthStr}.tgz`\n      ]\n    : [\n        `detektoren_${year}_${monthStr}.tgz`\n      ];\n\n\n  detectorCandidates.forEach(file => {\n\n    targets.push({\n      json: {\n        run_id: runId,\n        triggered_by: \"n8n\",\n        month_key,\n        dataset_version: \"new\",\n        source_type: \"detectors\",\n        source_url: basePath + file\n      }\n    });\n\n  });\n\n});\n\n\nreturn targets;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        16
+      ],
+      "id": "4635eabc-3750-42a8-a56f-1408373d4bbd",
+      "name": "Generator scope targets2"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "OFolT80vyKo0q4jd",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/OFolT80vyKo0q4jd",
+          "cachedResultName": "wf2-pipeline engine (fixed)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -464,
+        320
+      ],
+      "id": "d8048cca-c54e-4f62-a98f-833ff7224048",
+      "name": "Call 'wf2-pipeline engine (fixed)'"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Run": {
+      "main": [
+        [
+          {
+            "node": "Manual scope input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual scope input": {
+      "main": [
+        [
+          {
+            "node": "DB_Create ingestion run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Python via HTTP": {
+      "main": [
+        [
+          {
+            "node": "Vars_Set py_run_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate targets": {
+      "main": [
+        [
+          {
+            "node": "set-start Timestamp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update run_id": {
+      "main": [
+        [
+          {
+            "node": "Build ingestion summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger_Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "DB_Create ingestion run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_Create ingestion run": {
+      "main": [
+        [
+          {
+            "node": "Generator scope targets2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vars_Set py_run_id": {
+      "main": [
+        [
+          {
+            "node": "Call 'wf2-pipeline engine (fixed)'",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build ingestion summary": {
+      "main": [
+        [
+          {
+            "node": "Build Slack Alert Message3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "set-start Timestamp": {
+      "main": [
+        [
+          {
+            "node": "Trigger Python via HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack Alert Message3": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generator scope targets2": {
+      "main": [
+        [
+          {
+            "node": "Aggregate targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'wf2-pipeline engine (fixed)'": {
+      "main": [
+        [
+          {
+            "node": "Update run_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e33b3001-b16f-499e-9586-55f7d177194d",
+  "meta": {
+    "instanceId": "2e4a521231e66a81e1a37093b863c59b462694a229c1a33b2dd08d16fd04ee50"
+  },
+  "id": "1NZqF8F9knWfo3gl",
+  "tags": []
+}
