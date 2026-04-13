@@ -17,7 +17,6 @@ from src.queries import (
 )
 from src.ui import apply_entity_labels, label_entity_type
 
-
 # ===============================
 # Demo Mode Switch
 # ===============================
@@ -49,11 +48,35 @@ def load_detector_lookup():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_yearmonths():
+def load_yearmonths(mode: str, entity_type: str) -> pd.DataFrame:
     if DEMO_MODE:
-        return load_demo_data("year_months", {})
-    cfg = get_config()
-    return read_sql_df(cfg, YEAR_MONTHS, {})
+        if mode == "Hourly":
+            df = load_demo_data("kpi_hourly", {"entity_type": entity_type})
+        else:
+            df = load_demo_data("kpi_daily", {"entity_type": entity_type})
+    else:
+        cfg = get_config()
+        df = read_sql_df(cfg, YEAR_MONTHS, {})
+
+    if df.empty:
+        return pd.DataFrame(columns=["year_utc", "month_utc", "year_month"])
+
+    if ("year_utc" not in df.columns or "month_utc" not in df.columns):
+        if mode == "Hourly" and "ts_utc" in df.columns:
+            df["ts_utc"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
+            df["year_utc"] = df["ts_utc"].dt.year
+            df["month_utc"] = df["ts_utc"].dt.month
+        elif mode == "Daily" and "d_utc" in df.columns:
+            df["d_utc"] = pd.to_datetime(df["d_utc"], errors="coerce")
+            df["year_utc"] = df["d_utc"].dt.year
+            df["month_utc"] = df["d_utc"].dt.month
+
+    ym = df[["year_utc", "month_utc"]].dropna().drop_duplicates().copy()
+    ym["year_utc"] = ym["year_utc"].astype(int)
+    ym["month_utc"] = ym["month_utc"].astype(int)
+    ym["year_month"] = ym["year_utc"].astype(str) + "_" + ym["month_utc"].astype(str).str.zfill(2)
+    ym = ym.sort_values(["year_utc", "month_utc"], ascending=[False, False]).reset_index(drop=True)
+    return ym
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -133,16 +156,6 @@ def infer_value_label(kpi_family: str | None) -> str:
     if "flow" in k or "volume" in k or "count" in k or "verkehr" in k:
         return "Flow / Volume (vehicles/hour)"
     return "Selected KPI Value"
-
-
-def health_label(c: float) -> str:
-    if pd.isna(c):
-        return "Unknown"
-    if c >= 0.9:
-        return "High"
-    if c >= 0.7:
-        return "Medium"
-    return "Low"
 
 
 def safe_unique_sorted(df: pd.DataFrame, col: str) -> list[str]:
@@ -242,24 +255,12 @@ with st.sidebar:
 # ===============================
 # Data Load
 # ===============================
-year_month_df = load_yearmonths()
+year_month_df = load_yearmonths(mode, entity_type)
 
 if year_month_df.empty:
-    st.info("No data available.")
+    st.info("No data available for the selected mode/entity.")
     st.stop()
 
-year_month_df["year_utc"] = pd.to_numeric(year_month_df["year_utc"], errors="coerce")
-year_month_df["month_utc"] = pd.to_numeric(year_month_df["month_utc"], errors="coerce")
-year_month_df = year_month_df.dropna(subset=["year_utc", "month_utc"]).copy()
-
-year_month_df["year_utc"] = year_month_df["year_utc"].astype(int)
-year_month_df["month_utc"] = year_month_df["month_utc"].astype(int)
-year_month_df["year_month"] = (
-    year_month_df["year_utc"].astype(str)
-    + "_"
-    + year_month_df["month_utc"].astype(str).str.zfill(2)
-)
-year_month_df = year_month_df.sort_values(["year_utc", "month_utc"], ascending=[False, False])
 available_yearmonths = year_month_df["year_month"].drop_duplicates().tolist()
 
 with st.sidebar:
@@ -304,7 +305,6 @@ if x not in df.columns:
     st.error(f"Expected time column '{x}' not found.")
     st.stop()
 
-# hard safety filter
 if mode == "Hourly" and "ts_utc" in df.columns:
     df["ts_utc"] = pd.to_datetime(df["ts_utc"], errors="coerce", utc=True)
     df = df[
